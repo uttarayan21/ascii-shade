@@ -1,0 +1,12 @@
+[package]
+name = "ascii-shade"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.86"
+clap = { version = "4.5.8", features = ["derive"] }
+fast_image_resize = "4.0.0"
+tracing = "0.1.40"
+zune-image = "0.4.15"
+zune-jpeg = "0.4.11"
