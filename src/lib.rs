@@ -1,12 +1,20 @@
 mod vectors;
+use std::borrow::Cow;
+
+use ascii_shade_macros::shader_map;
 use fast_image_resize::{images::Image, IntoImageView, PixelType};
 use tracing::instrument;
 use vectors::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, derive_builder::Builder)]
+#[builder(setter(into))]
 pub struct AsciifyOptions {
     resolution: Vec2<u32>,
+    #[builder(default = "fast_image_resize::Resizer::new()", setter(skip))]
     resizer: fast_image_resize::Resizer,
+    #[builder(default = "None", setter(name = "resizer"))]
+    resizer_options: Option<fast_image_resize::ResizeOptions>,
+    shader: ShaderMap<'static>,
 }
 
 impl AsciifyOptions {
@@ -14,7 +22,13 @@ impl AsciifyOptions {
         Self {
             resolution: Vec2 { x: 80, y: 40 },
             resizer: fast_image_resize::Resizer::new(),
+            shader: SHADER_MAP_DEFAULT,
+            resizer_options: None,
         }
+    }
+
+    pub fn builder() -> AsciifyOptionsBuilder {
+        AsciifyOptionsBuilder::default()
     }
 
     pub fn resize(&mut self, resolution: Vec2<u32>) {
@@ -22,42 +36,42 @@ impl AsciifyOptions {
     }
 }
 
-// pub struct Asciify {
-//     options: AsciifyOptions,
-// }
 impl AsciifyOptions {
     #[instrument(level = "trace", skip(input))]
     pub fn scale<'b>(&'_ mut self, input: &'b impl IntoImageView) -> anyhow::Result<Image<'b>> {
         use fast_image_resize::images::Image;
         let mut output_image = Image::new(self.resolution.x, self.resolution.y, PixelType::U8x3);
-        self.resizer.resize(input, &mut output_image, None)?;
+        self.resizer
+            .resize(input, &mut output_image, &self.resizer_options)?;
         Ok(output_image)
     }
 }
 
+pub struct TerminalImage {
+    data: Vec<char>, // Since it might be unicde, we use char
+    width: usize,
+}
+
+impl core::fmt::Display for TerminalImage {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for line in self.data.chunks(self.width) {
+            for &c in line {
+                write!(f, "{}", c)?;
+            }
+            writeln!(f)?;
+        }
+        Ok(())
+    }
+}
+
 #[instrument(level = "trace", fields(input = "input.len()"))]
-pub fn asciify(input: &impl IntoImageView, mut options: AsciifyOptions) -> anyhow::Result<String> {
+pub fn asciify(
+    input: &impl IntoImageView,
+    mut options: AsciifyOptions,
+) -> anyhow::Result<TerminalImage> {
     let scaled = options.scale(input)?;
     let luminanced = luminance(scaled.buffer());
-    let quantized = quantize(&luminanced, 8);
-    let ascii = SHADER_MAP8.shade_all(&quantized);
-    let ascii = ascii
-        .chunks_exact(scaled.width() as usize)
-        .map(|line| {
-            let mut line = line.to_vec();
-            line.push(b'\n');
-            line
-        })
-        .flatten();
-    // let quantized_normal = u8x1_to_u8x3(&quantized);
-    // let quantized = Image::from_vec_u8(
-    //     scaled.width(),
-    //     scaled.height(),
-    //     quantized_normal,
-    //     PixelType::U8x3,
-    // )?;
-    let ascii = String::from_utf8(ascii.collect())?;
-
+    let ascii = options.shader.render(&luminanced, scaled.width() as _);
     Ok(ascii)
 }
 
@@ -76,39 +90,63 @@ pub fn luminance(pixels: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-/// This function quantizes the pixel values to a given number of levels
-pub fn quantize(pixels: &[u8], levels: u8) -> Vec<u8> {
-    pixels
-        .iter()
-        .map(|&pixel| {
-            let step = 255 / levels;
-            let level = pixel / step;
-            level - 1
-        })
-        .collect()
-}
-
-pub fn u8x1_to_u8x3(pixels: &[u8]) -> Vec<u8> {
-    pixels
-        .iter()
-        .flat_map(|&pixel| [pixel, pixel, pixel])
-        .collect()
-}
-
-impl<const SIZE: usize> ShaderMap<SIZE> {
+impl ShaderMap<'_> {
     #[inline(always)]
-    pub fn shade(&self, value: u8) -> u8 {
+    pub fn quantize(&self, value: u8) -> u8 {
+        let step = 255 / self.map.len() as u8;
+        let level = value / step;
+        level.saturating_sub(1)
+    }
+
+    pub fn quantize_all(&self, values: &[u8]) -> Vec<u8> {
+        values.iter().map(|&value| self.quantize(value)).collect()
+    }
+
+    #[inline(always)]
+    pub fn shade(&self, value: u8) -> char {
         self.map[value as usize]
     }
-    pub fn shade_all(&self, values: &[u8]) -> Vec<u8> {
+    pub fn shade_all(&self, values: &[u8]) -> Vec<char> {
         values.iter().map(|&value| self.shade(value)).collect()
+    }
+
+    pub fn render(&self, values: &[u8], width: usize) -> TerminalImage {
+        let data = self.quantize_all(values);
+        let data = self.shade_all(&data);
+        TerminalImage { data, width }
+    }
+
+    pub fn from_str(map: &str) -> Self {
+        Self {
+            map: map.chars().collect(),
+        }
     }
 }
 
-pub struct ShaderMap<const SIZE: usize> {
-    pub map: [u8; SIZE],
+#[derive(Debug, Clone)]
+pub struct ShaderMap<'s> {
+    pub map: Cow<'s, [char]>,
 }
 
-const SHADER_MAP8: ShaderMap<8> = ShaderMap {
-    map: [b' ', b'.', b':', b'-', b'=', b'*', b'#', b'@'],
-};
+pub const SHADER_MAP_DEFAULT: ShaderMap = shader_map!(" .:-=*#@");
+pub const SHADER_MAP_UNICODE: ShaderMap = shader_map!(" ░▒▓█");
+pub const SHADER_MAP_MIXED: ShaderMap = shader_map!(" .-=*#@░▒▓█");
+
+// /// This function quantizes the pixel values to a given number of levels
+// pub fn quantize(pixels: &[u8], levels: u8) -> Vec<u8> {
+//     pixels
+//         .iter()
+//         .map(|&pixel| {
+//             let step = 255 / levels;
+//             let level = pixel / step;
+//             level.saturating_sub(1)
+//         })
+//         .collect()
+// }
+
+// pub fn u8x1_to_u8x3(pixels: &[u8]) -> Vec<u8> {
+//     pixels
+//         .iter()
+//         .flat_map(|&pixel| [pixel, pixel, pixel])
+//         .collect()
+// }

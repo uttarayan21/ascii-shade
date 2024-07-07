@@ -10,3 +10,5 @@ fast_image_resize = "4.0.0"
 tracing = "0.1.40"
 zune-image = "0.4.15"
 zune-jpeg = "0.4.11"
+ascii-shade-macros = { path = "ascii-shade-macros" }
+derive_builder = "0.20.0"
