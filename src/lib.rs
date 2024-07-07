@@ -93,7 +93,7 @@ pub fn luminance(pixels: &[u8]) -> Vec<u8> {
 impl ShaderMap<'_> {
     #[inline(always)]
     pub fn quantize(&self, value: u8) -> u8 {
-        let step = 255 / self.map.len() as u8;
+        let step = 255 / self.map.len() as u8 - 1;
         let level = value / step;
         level.saturating_sub(1)
     }
